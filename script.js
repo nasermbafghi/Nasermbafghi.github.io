@@ -1,0 +1,1 @@
+const observer=new IntersectionObserver(entries=>{entries.forEach(e=>{if(e.isIntersecting){e.target.classList.add('visible');observer.unobserve(e.target)}})},{threshold:.08});document.querySelectorAll('.hero-copy,.portrait-area').forEach(e=>{e.classList.add('reveal');observer.observe(e)});
