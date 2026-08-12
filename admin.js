@@ -1,107 +1,76 @@
 import { supabase } from './supabase-config.js';
 
-const $ = (q) => document.querySelector(q);
-const loginView = $('#login-view');
-const dashboardView = $('#dashboard-view');
-const loginForm = $('#login-form');
-const logoutBtn = $('#logout-btn');
-const projectForm = $('#project-form');
-let projectsCache = [];
+const $=q=>document.querySelector(q), $$=q=>[...document.querySelectorAll(q)];
+const loginView=$('#login-view'), dashboardView=$('#dashboard-view'), loginForm=$('#login-form'), logoutBtn=$('#logout-btn');
+let caches={projects:[],experiences:[],contacts:[],expertise:[],publications:[],skills:[],education:[]};
+const esc=(v='')=>String(v).replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
+const lines=v=>String(v||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+const csv=v=>String(v||'').split(',').map(x=>x.trim()).filter(Boolean);
+const status=(el,text,type='')=>{if(!el)return;el.textContent=text||'';el.className=`form-status ${type}`.trim();};
+const fmt=v=>v?new Intl.DateTimeFormat('en',{dateStyle:'medium',timeStyle:'short'}).format(new Date(v)):'';
+const slugify=s=>String(s||'project').toLowerCase().trim().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,70)||`project-${Date.now()}`;
+const scrollToForm=f=>f?.scrollIntoView({behavior:'smooth',block:'center'});
 
-function setStatus(el, text, type='') { el.textContent = text || ''; el.className = `form-status ${type}`.trim(); }
-function escapeHtml(value=''){return String(value).replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));}
-function formatDate(value){return value ? new Intl.DateTimeFormat('en',{dateStyle:'medium',timeStyle:'short'}).format(new Date(value)) : '';}
-
-async function isAdmin(){
-  const { data, error } = await supabase.rpc('is_admin');
-  return !error && data === true;
-}
-
+async function isAdmin(){const {data,error}=await supabase.rpc('is_admin');return !error&&data===true;}
 async function showSession(session){
-  if (!session) {
-    loginView.hidden = false; dashboardView.hidden = true; logoutBtn.hidden = true; return;
-  }
-  if (!(await isAdmin())) {
-    await supabase.auth.signOut();
-    loginView.hidden = false; dashboardView.hidden = true; logoutBtn.hidden = true;
-    setStatus($('#login-status'),'This account is authenticated but is not registered as an administrator.','error');
-    return;
-  }
-  loginView.hidden = true; dashboardView.hidden = false; logoutBtn.hidden = false;
-  $('#admin-email').textContent = session.user.email || '';
-  await Promise.all([loadMessages(), loadProjects()]);
+ if(!session){loginView.hidden=false;dashboardView.hidden=true;logoutBtn.hidden=true;return;}
+ if(!(await isAdmin())){await supabase.auth.signOut();loginView.hidden=false;dashboardView.hidden=true;logoutBtn.hidden=true;status($('#login-status'),'This account is not registered as an administrator.','error');return;}
+ loginView.hidden=true;dashboardView.hidden=false;logoutBtn.hidden=false;$('#admin-email').textContent=session.user.email||'';
+ await Promise.all([loadSettings(),loadMessages(),loadProjects(),loadExperiences(),loadContacts(),loadExpertise(),loadPublications(),loadSkills(),loadEducation(),loadProfileItems()]);
+}
+loginForm.addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(loginForm);status($('#login-status'),'Signing in…');const {data,error}=await supabase.auth.signInWithPassword({email:String(f.get('email')).trim(),password:String(f.get('password'))});if(error)return status($('#login-status'),error.message,'error');status($('#login-status'),'');await showSession(data.session);});
+logoutBtn.onclick=async()=>{await supabase.auth.signOut();await showSession(null);};
+
+async function upload(bucket,file,prefix='file'){
+ const ext=(file.name.split('.').pop()||'bin').toLowerCase();const path=`${prefix}/${Date.now()}-${Math.random().toString(36).slice(2,8)}.${ext}`;
+ const {error}=await supabase.storage.from(bucket).upload(path,file,{upsert:false,contentType:file.type});if(error)throw error;
+ return supabase.storage.from(bucket).getPublicUrl(path).data.publicUrl;
 }
 
-loginForm.addEventListener('submit', async (e)=>{
-  e.preventDefault();
-  const fd = new FormData(loginForm);
-  setStatus($('#login-status'),'Signing in…');
-  const { data, error } = await supabase.auth.signInWithPassword({email:String(fd.get('email')).trim(),password:String(fd.get('password'))});
-  if(error) return setStatus($('#login-status'),error.message,'error');
-  setStatus($('#login-status'),'');
-  await showSession(data.session);
-});
-logoutBtn.addEventListener('click', async()=>{await supabase.auth.signOut();await showSession(null);});
-
-async function loadMessages(){
-  const {data,error}=await supabase.from('messages').select('*').order('created_at',{ascending:false});
-  const list=$('#messages-list');
-  if(error){list.innerHTML=`<p class="empty-state">${escapeHtml(error.message)}</p>`;return;}
-  $('#message-count').textContent=data.length;
-  list.innerHTML=data.length?data.map(m=>`<article class="message-item ${m.is_read?'':'unread'}" data-id="${m.id}"><div class="message-meta"><span>${escapeHtml(m.name)}</span><span>${escapeHtml(m.email)}</span><span>${escapeHtml(formatDate(m.created_at))}</span></div><h4>${escapeHtml(m.subject||'No subject')}</h4><p>${escapeHtml(m.message)}</p><div class="item-actions"><button data-action="toggle-read">Mark ${m.is_read?'unread':'read'}</button><a class="ghost-btn" href="mailto:${encodeURIComponent(m.email)}?subject=${encodeURIComponent('Re: '+(m.subject||'Your message'))}">Reply</a><button data-action="delete-message">Delete</button></div></article>`).join(''):'<p class="empty-state">No messages yet.</p>';
-  list.querySelectorAll('[data-action="toggle-read"]').forEach(btn=>btn.onclick=async()=>{const row=btn.closest('.message-item');const current=!row.classList.contains('unread');await supabase.from('messages').update({is_read:!current}).eq('id',row.dataset.id);loadMessages();});
-  list.querySelectorAll('[data-action="delete-message"]').forEach(btn=>btn.onclick=async()=>{if(!confirm('Delete this message?'))return;await supabase.from('messages').delete().eq('id',btn.closest('.message-item').dataset.id);loadMessages();});
+async function loadSettings(){
+ const {data,error}=await supabase.from('site_settings').select('*').eq('id',1).single();if(error){status($('#settings-status'),error.message,'error');return;}
+ const f=$('#settings-form');Object.entries(data).forEach(([k,v])=>{const el=f.elements[k];if(!el)return;if(el.type==='checkbox')el.checked=!!v;else if(k==='about_paragraphs')el.value=(v||[]).join('\n\n');else el.value=v??'';});
 }
-
-async function loadProjects(){
-  const {data,error}=await supabase.from('projects').select('*').order('sort_order',{ascending:true}).order('created_at',{ascending:false});
-  const list=$('#projects-list');
-  if(error){list.innerHTML=`<p class="empty-state">${escapeHtml(error.message)}</p>`;return;}
-  projectsCache=data; $('#project-count').textContent=data.length; $('#published-count').textContent=data.filter(p=>p.published).length;
-  list.innerHTML=data.length?data.map(p=>`<article class="admin-project-item" data-id="${p.id}"><div class="project-admin-meta"><span>${escapeHtml(p.year)}</span><span>${p.published?'PUBLISHED':'DRAFT'}</span><span>ORDER ${escapeHtml(p.sort_order)}</span></div><h4>${escapeHtml(p.title)}</h4><div class="item-actions"><button data-action="edit-project">Edit</button><button data-action="toggle-publish">${p.published?'Unpublish':'Publish'}</button><button data-action="delete-project">Delete</button></div></article>`).join(''):'<p class="empty-state">No database projects yet.</p>';
-  list.querySelectorAll('[data-action="edit-project"]').forEach(btn=>btn.onclick=()=>editProject(btn.closest('article').dataset.id));
-  list.querySelectorAll('[data-action="toggle-publish"]').forEach(btn=>btn.onclick=async()=>{const p=projectsCache.find(x=>String(x.id)===btn.closest('article').dataset.id);await supabase.from('projects').update({published:!p.published}).eq('id',p.id);loadProjects();});
-  list.querySelectorAll('[data-action="delete-project"]').forEach(btn=>btn.onclick=async()=>{if(!confirm('Delete this project from the database?'))return;await supabase.from('projects').delete().eq('id',btn.closest('article').dataset.id);loadProjects();clearProjectForm();});
-}
-
-function clearProjectForm(){projectForm.reset();projectForm.elements.id.value='';projectForm.elements.sort_order.value='100';projectForm.elements.published.checked=true;$('#editor-title').textContent='Add project';$('#current-media').innerHTML='';setStatus($('#project-status'),'');}
-function editProject(id){
-  const p=projectsCache.find(x=>String(x.id)===String(id)); if(!p)return;
-  projectForm.elements.id.value=p.id; projectForm.elements.title.value=p.title||''; projectForm.elements.year.value=p.year||''; projectForm.elements.description.value=p.description||''; projectForm.elements.technologies.value=(p.technologies||[]).join(', '); projectForm.elements.sort_order.value=p.sort_order??100; projectForm.elements.published.checked=!!p.published;
-  $('#editor-title').textContent='Edit project';
-  const images=[p.cover_image,...(p.gallery||[])].filter((v,i,a)=>v&&a.indexOf(v)===i);
-  $('#current-media').innerHTML=images.length?`Current images:<br>${images.map(src=>`<img src="${escapeHtml(src)}" alt="">`).join('')}`:'';
-  projectForm.scrollIntoView({behavior:'smooth',block:'start'});
-}
-
-async function uploadFile(file){
-  const safe=file.name.toLowerCase().replace(/[^a-z0-9._-]+/g,'-');
-  const path=`${new Date().getFullYear()}/${crypto.randomUUID()}-${safe}`;
-  const {error}=await supabase.storage.from('project-images').upload(path,file,{cacheControl:'3600',upsert:false});
-  if(error) throw error;
-  return supabase.storage.from('project-images').getPublicUrl(path).data.publicUrl;
-}
-
-projectForm.addEventListener('submit',async(e)=>{
-  e.preventDefault(); const fd=new FormData(projectForm); const id=String(fd.get('id')||'');
-  const existing=projectsCache.find(p=>String(p.id)===id);
-  const submit=projectForm.querySelector('button[type="submit"]'); submit.disabled=true; setStatus($('#project-status'),'Saving…');
-  try{
-    const coverFile=projectForm.elements.cover.files[0]; const galleryFiles=[...projectForm.elements.gallery.files];
-    const cover=coverFile?await uploadFile(coverFile):(existing?.cover_image||'');
-    const gallery=galleryFiles.length?await Promise.all(galleryFiles.map(uploadFile)):(existing?.gallery||[]);
-    const title=String(fd.get('title')).trim();
-    const payload={title,slug:title.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')+'-'+String(fd.get('year')),year:Number(fd.get('year')),description:String(fd.get('description')).trim(),technologies:String(fd.get('technologies')||'').split(',').map(s=>s.trim()).filter(Boolean),sort_order:Number(fd.get('sort_order')||100),published:projectForm.elements.published.checked,cover_image:cover,gallery};
-    const result=id?await supabase.from('projects').update(payload).eq('id',id):await supabase.from('projects').insert(payload);
-    if(result.error) throw result.error;
-    setStatus($('#project-status'),'Project saved.','success'); await loadProjects(); clearProjectForm();
-  }catch(err){setStatus($('#project-status'),err.message||'Could not save project.','error');}
-  finally{submit.disabled=false;}
+$('#settings-form').addEventListener('submit',async e=>{
+ e.preventDefault();const form=e.currentTarget, fd=new FormData(form);status($('#settings-status'),'Saving…');let resumeUrl=String(fd.get('resume_url')||'').trim();
+ const file=form.elements.resume_file.files[0];try{if(file)resumeUrl=await upload('site-files',file,'resume');}catch(err){return status($('#settings-status'),err.message,'error');}
+ const bools=['show_resume','show_about','show_expertise','show_experience','show_projects','show_publications','show_skills','show_education','show_contact','show_contact_form'];
+ const payload={id:1,full_name:String(fd.get('full_name')||'').trim(),professional_title:String(fd.get('professional_title')||'').trim(),hero_lead:String(fd.get('hero_lead')||'').trim(),portrait_line_1:String(fd.get('portrait_line_1')||'').trim(),portrait_line_2:String(fd.get('portrait_line_2')||'').trim(),about_heading:String(fd.get('about_heading')||'').trim(),about_paragraphs:String(fd.get('about_paragraphs')||'').split(/\n\s*\n|\r?\n/).map(x=>x.trim()).filter(Boolean),contact_heading:String(fd.get('contact_heading')||'').trim(),contact_lead:String(fd.get('contact_lead')||'').trim(),footer_text:String(fd.get('footer_text')||'').trim(),seo_title:String(fd.get('seo_title')||'').trim(),seo_description:String(fd.get('seo_description')||'').trim(),resume_url:resumeUrl,resume_label:String(fd.get('resume_label')||'Download CV').trim(),updated_at:new Date().toISOString()};bools.forEach(k=>payload[k]=form.elements[k].checked);
+ const {error}=await supabase.from('site_settings').upsert(payload);if(error)return status($('#settings-status'),error.message,'error');form.elements.resume_url.value=resumeUrl;form.elements.resume_file.value='';status($('#settings-status'),'Saved. Refresh the public site to see the changes.','success');
 });
 
-$('#new-project-btn').onclick=()=>{clearProjectForm();projectForm.scrollIntoView({behavior:'smooth'});};
-$('#cancel-edit-btn').onclick=clearProjectForm;
+async function loadMessages(){const {data,error}=await supabase.from('messages').select('*').order('created_at',{ascending:false});const list=$('#messages-list');if(error){list.innerHTML=`<p class="empty-state">${esc(error.message)}</p>`;return;}$('#message-count').textContent=data.length;list.innerHTML=data.length?data.map(m=>`<article class="message-item ${m.is_read?'':'unread'}" data-id="${m.id}"><div class="message-meta"><span>${esc(m.name)}</span><span>${esc(m.email)}</span><span>${esc(fmt(m.created_at))}</span></div><h4>${esc(m.subject||'No subject')}</h4><p>${esc(m.message)}</p><div class="item-actions"><button data-act="read">Mark ${m.is_read?'unread':'read'}</button><a class="ghost-btn" href="mailto:${encodeURIComponent(m.email)}?subject=${encodeURIComponent('Re: '+(m.subject||'Your message'))}">Reply</a><button data-act="delete">Delete</button></div></article>`).join(''):'<p class="empty-state">No messages yet.</p>';$$('#messages-list [data-act="read"]').forEach(b=>b.onclick=async()=>{const row=b.closest('article'), unread=row.classList.contains('unread');await supabase.from('messages').update({is_read:unread}).eq('id',row.dataset.id);loadMessages();});$$('#messages-list [data-act="delete"]').forEach(b=>b.onclick=async()=>{if(confirm('Delete this message?')){await supabase.from('messages').delete().eq('id',b.closest('article').dataset.id);loadMessages();}});}
 $('#refresh-messages').onclick=loadMessages;
 
-const {data:{session}}=await supabase.auth.getSession();
-await showSession(session);
+function listHTML(rows,subtitleFn){return rows.length?rows.map(x=>`<article class="admin-project-item" data-id="${x.id}"><div class="project-admin-meta"><span>${x.published?'PUBLISHED':'DRAFT'}</span><span>ORDER ${esc(x.sort_order)}</span></div><h4>${esc(x.title||x.role||x.label||x.degree)}</h4>${subtitleFn?`<p class="admin-item-subtitle">${esc(subtitleFn(x)||'')}</p>`:''}<div class="item-actions"><button data-act="edit">Edit</button><button data-act="toggle">${x.published?'Hide':'Show'}</button><button data-act="delete">Delete</button></div></article>`).join(''):'<p class="empty-state">No items yet.</p>';}
+function clearForm(form){form.reset();if(form.elements.id)form.elements.id.value='';if(form.elements.sort_order)form.elements.sort_order.value=100;if(form.elements.published)form.elements.published.checked=true;}
+function bindList(listSel,cacheKey,table,form,fill,load){const list=$(listSel);list.querySelectorAll('[data-act="edit"]').forEach(b=>b.onclick=()=>{const x=caches[cacheKey].find(r=>String(r.id)===b.closest('article').dataset.id);fill(x);scrollToForm(form);});list.querySelectorAll('[data-act="toggle"]').forEach(b=>b.onclick=async()=>{const x=caches[cacheKey].find(r=>String(r.id)===b.closest('article').dataset.id);await supabase.from(table).update({published:!x.published,updated_at:new Date().toISOString()}).eq('id',x.id);load();});list.querySelectorAll('[data-act="delete"]').forEach(b=>b.onclick=async()=>{if(!confirm('Delete this item?'))return;await supabase.from(table).delete().eq('id',b.closest('article').dataset.id);load();});}
+
+async function loadProjects(){const {data,error}=await supabase.from('projects').select('*').order('sort_order').order('created_at',{ascending:false});if(error)return;caches.projects=data;$('#project-count').textContent=data.length;$('#projects-list').innerHTML=listHTML(data,x=>x.year||'');bindList('#projects-list','projects','projects',$('#project-form'),fillProject,loadProjects);}
+function fillProject(x){const f=$('#project-form');f.elements.id.value=x.id;f.elements.title.value=x.title||'';f.elements.year.value=x.year||'';f.elements.description.value=x.description||'';f.elements.technologies.value=(x.technologies||[]).join(', ');f.elements.sort_order.value=x.sort_order??100;f.elements.published.checked=!!x.published;$('#current-media').innerHTML=[x.cover_image,...(x.gallery||[])].filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i).map(u=>`<img src="${esc(u)}" alt="">`).join('');}
+$('#project-form').addEventListener('submit',async e=>{e.preventDefault();const f=e.currentTarget,fd=new FormData(f),id=fd.get('id');status($('#project-status'),'Saving…');let old=caches.projects.find(x=>String(x.id)===String(id));let cover=old?.cover_image||'',gallery=[...(old?.gallery||[])];try{if(f.elements.cover.files[0])cover=await upload('project-images',f.elements.cover.files[0],'covers');for(const file of f.elements.gallery.files)gallery.push(await upload('project-images',file,'gallery'));}catch(err){return status($('#project-status'),err.message,'error');}const payload={title:String(fd.get('title')).trim(),year:fd.get('year')?Number(fd.get('year')):null,description:String(fd.get('description')).trim(),technologies:csv(fd.get('technologies')),cover_image:cover,gallery:[...new Set(gallery.filter(Boolean))],published:f.elements.published.checked,sort_order:Number(fd.get('sort_order')||100),updated_at:new Date().toISOString()};let q;if(id)q=supabase.from('projects').update(payload).eq('id',id);else q=supabase.from('projects').insert({...payload,slug:`${slugify(payload.title)}-${Date.now()}`});const {error}=await q;if(error)return status($('#project-status'),error.message,'error');clearForm(f);$('#current-media').innerHTML='';status($('#project-status'),'Saved.','success');loadProjects();});
+$('#new-project-btn').onclick=()=>{clearForm($('#project-form'));scrollToForm($('#project-form'));};$('#cancel-edit-btn').onclick=()=>{clearForm($('#project-form'));$('#current-media').innerHTML='';};
+
+async function loadExperiences(){const {data,error}=await supabase.from('experiences').select('*').order('sort_order');if(error)return;caches.experiences=data;$('#experience-count').textContent=data.length;$('#experiences-list').innerHTML=listHTML(data,x=>`${x.company} · ${x.period}`);bindList('#experiences-list','experiences','experiences',$('#experience-form'),fillExperience,loadExperiences);}
+function fillExperience(x){const f=$('#experience-form');for(const k of ['id','role','company','period','summary','sort_order'])f.elements[k].value=x[k]??'';f.elements.responsibilities.value=(x.responsibilities||[]).join('\n');f.elements.published.checked=!!x.published;}
+$('#experience-form').addEventListener('submit',async e=>{e.preventDefault();const f=e.currentTarget,fd=new FormData(f),id=fd.get('id'),payload={role:String(fd.get('role')).trim(),company:String(fd.get('company')).trim(),period:String(fd.get('period')).trim(),summary:String(fd.get('summary')).trim(),responsibilities:lines(fd.get('responsibilities')),published:f.elements.published.checked,sort_order:Number(fd.get('sort_order')||100),updated_at:new Date().toISOString()};const {error}=id?await supabase.from('experiences').update(payload).eq('id',id):await supabase.from('experiences').insert(payload);if(error)return status($('#experience-status'),error.message,'error');clearForm(f);status($('#experience-status'),'Saved.','success');loadExperiences();});$('#new-experience-btn').onclick=()=>{clearForm($('#experience-form'));scrollToForm($('#experience-form'));};$('#cancel-experience-btn').onclick=()=>clearForm($('#experience-form'));
+
+async function loadContacts(){const {data,error}=await supabase.from('contact_links').select('*').order('sort_order');if(error)return;caches.contacts=data;$('#contacts-list').innerHTML=listHTML(data,x=>x.value||x.platform);bindList('#contacts-list','contacts','contact_links',$('#contact-link-form'),fillContact,loadContacts);}
+function fillContact(x){const f=$('#contact-link-form');for(const k of ['id','platform','label','value','url','sort_order'])f.elements[k].value=x[k]??'';f.elements.published.checked=!!x.published;}
+$('#contact-link-form').addEventListener('submit',async e=>{e.preventDefault();const f=e.currentTarget,fd=new FormData(f),id=fd.get('id'),payload={platform:String(fd.get('platform')||'custom').trim(),label:String(fd.get('label')).trim(),value:String(fd.get('value')).trim(),url:String(fd.get('url')).trim(),published:f.elements.published.checked,sort_order:Number(fd.get('sort_order')||100),updated_at:new Date().toISOString()};const {error}=id?await supabase.from('contact_links').update(payload).eq('id',id):await supabase.from('contact_links').insert(payload);if(error)return status($('#contact-link-status'),error.message,'error');clearForm(f);status($('#contact-link-status'),'Saved.','success');loadContacts();});$('#new-contact-btn').onclick=()=>{clearForm($('#contact-link-form'));scrollToForm($('#contact-link-form'));};$('#clear-contact-btn').onclick=()=>clearForm($('#contact-link-form'));
+
+function setupSimple({key,table,list,formSel,newBtn,titleKey,subtitle,fields,arrayFields=[],countSel}){
+ const form=$(formSel);
+ const load=async()=>{const {data,error}=await supabase.from(table).select('*').order('sort_order');if(error)return;caches[key]=data;if(countSel)$(countSel).textContent=data.length;$(list).innerHTML=listHTML(data,x=>subtitle?.(x)||'');bindList(list,key,table,form,fill,load);};
+ const fill=x=>{Object.keys(x).forEach(k=>{const el=form.elements[k];if(!el)return;if(el.type==='checkbox')el.checked=!!x[k];else if(arrayFields.includes(k))el.value=(x[k]||[]).join('\n');else el.value=x[k]??'';});};
+ form.addEventListener('submit',async e=>{e.preventDefault();const fd=new FormData(form),id=fd.get('id'),payload={};fields.forEach(k=>{const el=form.elements[k];if(el.type==='checkbox')payload[k]=el.checked;else if(arrayFields.includes(k))payload[k]=lines(fd.get(k));else if(el.type==='number')payload[k]=fd.get(k)?Number(fd.get(k)):null;else payload[k]=String(fd.get(k)||'').trim();});payload.updated_at=new Date().toISOString();const {error}=id?await supabase.from(table).update(payload).eq('id',id):await supabase.from(table).insert(payload);if(error){alert(error.message);return;}clearForm(form);load();});
+ $(newBtn).onclick=()=>{clearForm(form);scrollToForm(form);};form.querySelector('[data-clear]')?.addEventListener('click',()=>clearForm(form));return load;
+}
+const loadExpertise=setupSimple({key:'expertise',table:'expertise_items',list:'#expertise-admin-list',formSel:'#expertise-form',newBtn:'#new-expertise-btn',subtitle:x=>x.description,fields:['title','icon','description','sort_order','published']});
+const loadPublications=setupSimple({key:'publications',table:'publications',list:'#publications-admin-list',formSel:'#publication-form',newBtn:'#new-publication-btn',subtitle:x=>`${x.journal} · ${x.year||''}`,fields:['year','title','journal','publisher','doi','publisher_url','sort_order','published'],countSel:'#publication-count'});
+const loadSkills=setupSimple({key:'skills',table:'skill_groups',list:'#skills-admin-list',formSel:'#skill-form',newBtn:'#new-skill-btn',subtitle:x=>(x.items||[]).join(' · '),fields:['title','items','sort_order','published'],arrayFields:['items']});
+const loadProfileItems=setupSimple({key:'profileItems',table:'profile_items',list:'#profile-items-admin-list',formSel:'#profile-item-form',newBtn:'#new-profile-item-btn',subtitle:x=>`${x.category}${x.subtitle?' · '+x.subtitle:''}`,fields:['category','title','subtitle','description','url','link_label','sort_order','published']});
+const loadEducation=setupSimple({key:'education',table:'education_items',list:'#education-admin-list',formSel:'#education-form',newBtn:'#new-education-btn',subtitle:x=>`${x.institution} · ${x.period}`,fields:['period','degree','institution','sort_order','published']});
+
+const {data:{session}}=await supabase.auth.getSession();await showSession(session);
+supabase.auth.onAuthStateChange((_event,session)=>{if(!session)showSession(null);});
